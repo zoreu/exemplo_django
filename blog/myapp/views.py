@@ -1,0 +1,98 @@
+from django.shortcuts import render
+from django.http import HttpResponse, StreamingHttpResponse
+from wsgiref.util import FileWrapper
+import os
+from pathlib import Path
+import mimetypes
+import re
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+range_re = re.compile(r'bytes\s*=\s*(\d+)\s*-\s*(\d*)', re.I)
+
+class RangeFileWrapper(object):
+    def __init__(self, filelike, blksize=8192, offset=0, length=None):
+        self.filelike = filelike
+        self.filelike.seek(offset, os.SEEK_SET)
+        self.remaining = length
+        self.blksize = blksize
+
+    def close(self):
+        if hasattr(self.filelike, 'close'):
+            self.filelike.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.remaining is None:
+            # If remaining is None, we're reading the entire file.
+            data = self.filelike.read(self.blksize)
+            if data:
+                return data
+            raise StopIteration()
+        else:
+            if self.remaining <= 0:
+                raise StopIteration()
+            data = self.filelike.read(min(self.remaining, self.blksize))
+            if not data:
+                raise StopIteration()
+            self.remaining -= len(data)
+            return data
+
+def stream_video(request, path):
+    range_header = request.META.get('HTTP_RANGE', '').strip()
+    range_match = range_re.match(range_header)
+    size = os.path.getsize(path)
+    content_type, encoding = mimetypes.guess_type(path)
+    content_type = content_type or 'application/octet-stream'
+    if range_match:
+        first_byte, last_byte = range_match.groups()
+        first_byte = int(first_byte) if first_byte else 0
+        last_byte = int(last_byte) if last_byte else size - 1
+        if last_byte >= size:
+            last_byte = size - 1
+        length = last_byte - first_byte + 1
+        resp = StreamingHttpResponse(
+            RangeFileWrapper(open(path, 'rb'), offset=first_byte, length=length),
+            status=206,
+            content_type=content_type,
+        )
+        resp['Content-Length'] = str(length)
+        resp['Content-Range'] = 'bytes %s-%s/%s' % (first_byte, last_byte, size)
+    else:
+        resp = StreamingHttpResponse(FileWrapper(open(path, 'rb')), content_type=content_type)
+        resp['Content-Length'] = str(size)
+    resp['Accept-Ranges'] = 'bytes'
+    return resp
+
+# Create your views here.
+def serve_static_file(request, path):
+    # Construa o caminho completo do arquivo
+    file_path = os.path.join(BASE_DIR, 'static', path)
+    if os.path.exists(file_path):
+        try:
+            # Abra o arquivo para leitura binária
+            if '.mp4' in file_path:
+                return stream_video(request, file_path)
+            else:
+                with open(file_path, 'rb') as file:
+                    # Crie uma resposta HTTP com o conteúdo do arquivo
+                    # Obtenha o tipo MIME da extensão do arquivo
+                    mime_type, _ = mimetypes.guess_type(file_path)
+                    content = file.read()
+                    response = HttpResponse(content, content_type=mime_type)
+                    return response
+        except:
+            # Se o arquivo não for encontrado, retorne uma resposta 404
+            return HttpResponse(status=404)
+    else:
+        return HttpResponse(status=404)
+
+
+def home(request):
+    return render(request, 'home.html', {
+        'title': 'Bem-vindo!',
+        'message': 'Este é um exemplo de página de boas-vindas em Django.',
+    })
